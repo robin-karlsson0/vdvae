@@ -112,6 +112,27 @@ def mse(x_hat, x, obs_mask=None):
     return mse.sum(dim=(1, 2, 3)) / obs_mask.sum(dim=(1, 2, 3))
 
 
+def cosine_sim(x_hat, x, obs_mask=None):
+    '''
+    Computes the cosine similarity between the model output and the target
+    tensor. Unobserved target elements are ignored.
+
+    Args:
+        x_hat: Model output tensor (N,D,H,W) with D as unit vectors
+        x: Model input tensor (N,D,H,W)
+    '''
+    cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+    sim = cos(x_hat, x)
+
+    if obs_mask is not None:
+        sim = torch.where(obs_mask, sim, torch.ones_like(sim))
+
+    loss = 1 - sim
+
+    # Mean over all observed elements
+    loss = loss.sum(dim=(1, 2)) / obs_mask.sum(dim=(1, 2))
+    return loss
+
 def get_num_mix_distr_params(num_ch):
     '''
     Returns the number of paramters required for each mixture distribution.
@@ -448,20 +469,34 @@ class DmolNet(nn.Module):
         self.ch = H.image_channels
         self.rec_objective = H.rec_objective
         # num_mix_distr_params = 3 * self.ch + 1  # [mu, s, w]*C + 1
-        num_mix_distr_params, _ = get_num_mix_distr_params(self.ch)
+        # num_mix_distr_params, _ = get_num_mix_distr_params(self.ch)
+        # self.out_conv = get_conv(
+        #     H.width,
+        #     H.num_mixtures * num_mix_distr_params,  # 2,
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0)
+
         self.out_conv = get_conv(
             H.width,
-            H.num_mixtures * num_mix_distr_params,  # 2,
+            768,
             kernel_size=1,
             stride=1,
             padding=0)
 
     def nll(self, px_z, x, mask):
-        return discretized_mix_logistic_loss(x=x,
-                                             l=self.forward(px_z),
-                                             mask=mask[:, :, :, 0],
-                                             low_bit=self.H.dataset
-                                             in ['ffhq_256'])
+        '''
+        Args:
+            px_z: Target tensor (N,H,W,D)
+            x: Model output tensor (N,H,W,D)
+            mask: Tensor (N,H,W) with 1's for observed elements
+        '''
+        # return discretized_mix_logistic_loss(x=x,
+        #                                      l=self.forward(px_z),
+        #                                      mask=mask[:, :, :, 0],
+        #                                      low_bit=self.H.dataset
+        #                                      in ['ffhq_256'])
+        return cosine_sim(x, px_z, mask)
 
     def forward(self, px_z):
         x_hat = self.out_conv(px_z)

@@ -1,3 +1,7 @@
+# FQA
+
+Set 'NUM_GPUS = 8' in 'utils.py'
+
 # Very Deep VAEs
 
 Repository for the paper "Very Deep VAEs Generalize Autoregressive Models and Can Outperform Them on Images" (https://arxiv.org/abs/2011.10650)

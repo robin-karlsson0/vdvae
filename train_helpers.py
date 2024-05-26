@@ -8,10 +8,12 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 import torch.distributed as dist
+
 # from mpi4py import MPI
 from torch.nn.parallel.distributed import DistributedDataParallel
 
 from apex.optimizers import FusedAdam as AdamW
+# from torch.optim import AdamW
 from data import mkdir_p
 from hps import Hyperparams, add_vae_arguments, parse_args_and_update_hparams
 from utils import local_mpi_rank, logger, maybe_download, mpi_rank, mpi_size
@@ -150,6 +152,21 @@ def restore_log(path, local_rank, mpi_size):
     iterate = max([z['step'] for z in loaded if 'type' in z and z['type'] == 'train_loss'])
     return cur_eval_loss, iterate, starting_epoch
 
+# TMP
+#import torch.nn as nn
+#class SimpleModel(nn.Module):
+#    def __init__(self):
+#        super(SimpleModel, self).__init__()
+#        self.fc1 = nn.Linear(10, 5)  # Input size: 10, Output size: 5
+#        self.fc2 = nn.Linear(5, 1)   # Input size: 5, Output size: 1
+#        self.relu = nn.ReLU()
+#
+#    def forward(self, x):
+#        x = self.fc1(x)
+#        x = self.relu(x)
+#        x = self.fc2(x)
+#        return x
+
 
 def load_vaes(H, logprint):
     vae = VAE(H)
@@ -168,7 +185,11 @@ def load_vaes(H, logprint):
     vae = vae.cuda(H.local_rank)
     ema_vae = ema_vae.cuda(H.local_rank)
 
+
+
     vae = DistributedDataParallel(vae, device_ids=[H.local_rank], output_device=H.local_rank)
+    # model = SimpleModel()
+    # vae = DistributedDataParallel(model, device_ids=[H.local_rank], output_device=H.local_rank)
 
     if len(list(vae.named_parameters())) != len(list(vae.parameters())):
         raise ValueError('Some params are not named. Please name all params.')

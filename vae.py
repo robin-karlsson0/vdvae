@@ -6,8 +6,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from vae_helpers import (DmolNet, HModule, draw_gaussian_diag_samples,
-                         gaussian_analytical_kl, get_1x1, get_3x3)
+from vae_helpers import (
+    DmolNet,
+    HModule,
+    cosine_sim,
+    draw_gaussian_diag_samples,
+    gaussian_analytical_kl,
+    get_1x1,
+    get_3x3,
+)
 
 
 class Block(nn.Module):
@@ -325,12 +332,17 @@ class Decoder(HModule):
             nn.Parameter(torch.zeros(1, self.widths[res], res, res))
             for res in self.resolutions if res <= H.no_bias_above
         ])
-        self.out_net = DmolNet(H)
-        self.gain = nn.Parameter(torch.ones(1, H.width, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(1, H.width, 1, 1))
-        self.final_fn = lambda x: x * self.gain + self.bias
+        # self.out_net = DmolNet(H)
+        # self.gain = nn.Parameter(torch.ones(1, H.width, 1, 1))
+        # self.bias = nn.Parameter(torch.zeros(1, H.width, 1, 1))
+        # self.final_fn = lambda x: x * self.gain + self.bias
+        self.proj = nn.Conv2d(H.width, 768, 1, stride=1 , padding=0)
 
     def forward(self, activations, get_latents=False, mode='train'):
+        '''
+        Returns:
+            x: (B, D, H, W)
+        '''
         stats = []
         xs = {a.shape[2]: a for a in self.bias_xs}
         for block in self.dec_blocks:
@@ -339,7 +351,10 @@ class Decoder(HModule):
                                     get_latents=get_latents,
                                     mode=mode)
             stats.append(block_stats)
-        xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        xs[self.H.image_size] = self.proj(xs[self.H.image_size])
+        # Normalize to unit vectors
+        xs[self.H.image_size] = F.normalize(xs[self.H.image_size], p=2, dim=1)
         return xs[self.H.image_size], stats
 
     def forward_uncond(self, n, t=None, y=None):
@@ -352,7 +367,10 @@ class Decoder(HModule):
             except TypeError:
                 temp = t
             xs = block.forward_uncond(xs, temp)
-        xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        xs[self.H.image_size] = self.proj(xs[self.H.image_size])
+        # Normalize to unit vectors
+        xs[self.H.image_size] = F.normalize(xs[self.H.image_size], p=2, dim=1)
         return xs[self.H.image_size]
 
     def forward_manual_latents(self, n, latents, t=None):
@@ -361,7 +379,10 @@ class Decoder(HModule):
             xs[bias.shape[2]] = bias.repeat(n, 1, 1, 1)
         for block, lvs in itertools.zip_longest(self.dec_blocks, latents):
             xs = block.forward_uncond(xs, t, lvs=lvs)
-        xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        xs[self.H.image_size] = self.proj(xs[self.H.image_size])
+        # Normalize to unit vectors
+        xs[self.H.image_size] = F.normalize(xs[self.H.image_size], p=2, dim=1)
         return xs[self.H.image_size]
 
 
@@ -379,8 +400,7 @@ class VAE(HModule):
         # Full posterior sampling
         if temp == 1:
             acts = self.encoder_post_match.forward(x)
-            px_z, _ = self.decoder.forward(acts, mode='post_match')
-            x_hat = self.decoder.out_net.sample(px_z)
+            x_hat, _ = self.decoder.forward(acts, mode='post_match')
         # Mixed posterior and final prior sampling with specified temperature
         else:
             zs = [
@@ -399,19 +419,20 @@ class VAE(HModule):
     def forward(self,
                 x_oracle,
                 x_post_match,
-                x_target,
                 mask=None,
                 mode='train'):
         '''
         Args:
-            x: Interval (-1, 1)
-            x_target: Interval (-1, 1)
+            x_oracle: (B, H, W, D)
+            x_target: (B, H, W, D)
+            mask: Binary mask (B, H, W) with true for x_oracle observations
         '''
-
-        device = x_target.get_device()
+        device = x_oracle.get_device()
 
         acts_oracle = self.encoder.forward(x_oracle)
         acts_post_match = self.encoder_post_match.forward(x_post_match)
+
+        x_oracle = x_oracle.permute(0, 3, 1, 2).contiguous()  # (B, D, H, W)
 
         # Stack activations for each feature map resolution
         activations = {}
@@ -420,19 +441,24 @@ class VAE(HModule):
             b = acts_post_match[key]
             activations[key] = torch.concat([a, b])
 
+        # px_z: (B, D, H, W)
         px_z, stats = self.decoder.forward(activations, mode=mode)
 
         # Masked ELBO computation
         if mask is None:
-            B, H, W, _ = x_target.shape
+            B, H, W, _ = x_oracle.shape
             mask = torch.ones((B, H, W))
             mask = mask.to(device)
-        distortion_per_pixel = self.decoder.out_net.nll(px_z, x_target, mask)
+        # px_z: Prediction
+        # x_oracle: Target
+        # mask: Target element mask
+        sim_loss = cosine_sim(px_z, x_oracle, mask)
+        # distortion_per_pixel = self.decoder.out_net.nll(px_z, x_oracle, mask)
 
-        rate_per_pixel = torch.zeros_like(distortion_per_pixel)
+        rate_per_pixel = torch.zeros_like(sim_loss)
         rate_per_pixel_post_match = torch.zeros(
-            stats[0]['kl_post_match'].shape[0], device=device)
-        ndims = np.prod(x_oracle.shape[1:])
+            stats[0]['kl_post_match'].shape[0], device=device)  # (B)
+        ndims = np.prod(x_oracle.shape[2:])  # [1:]
         for statdict in stats:
             rate_per_pixel += statdict['kl'].sum(dim=(1, 2, 3))
             rate_per_pixel_post_match += statdict['kl_post_match'].sum(dim=(1,
@@ -443,10 +469,10 @@ class VAE(HModule):
 
         rate_per_pixel_post_match = self.w_kl_oracle * rate_per_pixel_post_match
 
-        elbo = (distortion_per_pixel +
+        elbo = (sim_loss.mean() +
                 rate_per_pixel).mean() + rate_per_pixel_post_match.mean()
         return dict(elbo=elbo,
-                    distortion=distortion_per_pixel.mean(),
+                    distortion=sim_loss.mean(),
                     rate=rate_per_pixel.mean(),
                     rate_post_match=rate_per_pixel_post_match.mean())
 
@@ -462,7 +488,8 @@ class VAE(HModule):
 
     def forward_uncond_samples(self, n_batch, t=None):
         px_z = self.decoder.forward_uncond(n_batch, t=t)
-        return self.decoder.out_net.sample(px_z)
+        # return self.decoder.out_net.sample(px_z)
+        return px_z
 
     def forward_samples_set_latents(
         self,
@@ -471,4 +498,5 @@ class VAE(HModule):
         t=None,
     ):
         px_z = self.decoder.forward_manual_latents(n_batch, latents, t=t)
-        return self.decoder.out_net.sample(px_z)
+        # return self.decoder.out_net.sample(px_z)
+        return px_z

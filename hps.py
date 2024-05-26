@@ -137,6 +137,27 @@ bev256.skip_threshold = 180.
 HPARAMS_REGISTRY['bev256'] = bev256
 
 
+ov_bev256 = Hyperparams()
+ov_bev256.update(bev64)
+ov_bev256.n_batch = 2  # * 3  # def. BS * additional BS
+ov_bev256.width = 256
+ov_bev256.lr = 0.00015  # * (4 / 32) * 4 * 1  # num_nodes * additional BS
+ov_bev256.dataset = 'ov_bev256'
+ov_bev256.data_train_root = './c_bevs_single'
+ov_bev256.data_val_root = './c_bevs_single'
+ov_bev256.epochs_per_eval = 1
+ov_bev256.epochs_per_eval_save = 1
+ov_bev256.dec_blocks = "1x2,4m1,4x3,8m4,8x4,16m8,16x9,32m16,32x21,64m32,64x13,128m64,128x7,256m128"
+ov_bev256.enc_blocks = "256x3,256d2,128x8,128d2,64x12,64d2,32x17,32d2,16x7,16d2,8x5,8d2,4x5,4d4,1x4"
+# ov_bev256.custom_width_str = "256:64,128:64,64:64,32:64,16:256,8:256,4:512,1:512"  # res:width
+# ov_bev256.custom_width_str = "256:128,128:128,64:128,32:256,16:256,8:512,4:512,1:512"  # res:width
+ov_bev256.custom_width_str = "256:256,128:256,64:256,32:256,16:256,8:256,4:512,1:512"  # res:width
+
+ov_bev256.no_bias_above = 256
+ov_bev256.grad_clip = 130.
+ov_bev256.skip_threshold = 180.
+HPARAMS_REGISTRY['ov_bev256'] = ov_bev256
+
 def parse_args_and_update_hparams(H, parser, s=None):
     args = parser.parse_args(s)
     valid_args = set(args.__dict__.keys())

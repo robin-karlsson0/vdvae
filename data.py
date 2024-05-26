@@ -72,6 +72,17 @@ def set_up_data(H):
             H.image_size = 128
         elif H.dataset == 'bev256':
             H.image_size = 256
+    elif H.dataset == 'ov_bev256':
+        train_data = OvBevDataset(H.data_train_root,
+                                         do_rand_rot=H.rotate_samples,
+                                         do_masking=H.do_masking)
+        valid_data = OvBevDataset(H.data_val_root,
+                                         do_masking=H.do_masking)
+        H.image_channels = 768
+        H.image_channels_post_match = 768  # Mask is implicit by zero vectors
+        shift = 0.
+        scale = 0.
+        H.image_size = 256
     else:
         raise ValueError('unknown dataset: ', H.dataset)
 
@@ -93,7 +104,7 @@ def set_up_data(H):
         train_data = ImageFolder(trX, transforms.ToTensor())
         valid_data = ImageFolder(eval_dataset, transforms.ToTensor())
         untranspose = True
-    elif d == 'bev64' or d == 'bev128' or d == 'bev256':
+    elif d == 'bev64' or d == 'bev128' or d == 'bev256' or d == 'ov_bev256':
         untranspose = False
     else:
         train_data = TensorDataset(torch.as_tensor(trX))
@@ -241,6 +252,10 @@ class BEVDataset(Dataset):
         self.mask_p_max = mask_p_max
         self.do_intensity_zeroing = do_intensity_zeroing
 
+        # Prevent invisible multi-gpu hang
+        if len(self.sample_paths) == 0:
+            raise ValueError(f'Dataset: No samples found in {root_dir}')
+
     def __len__(self):
         return len(self.sample_paths)
 
@@ -279,17 +294,83 @@ class BEVDataset(Dataset):
             print(error)
 
 
+class OvBevDataset(BEVDataset):
+
+    def __init__(
+        self,
+        root_dir,
+        do_rand_rot=False,
+        reduced_subset_size=-1,
+        do_masking=False,
+        mask_p_min=0.95,
+        mask_p_max=0.99,
+        do_intensity_zeroing=False,
+    ):
+        super().__init__(
+            root_dir,
+            do_rand_rot,
+            reduced_subset_size,
+            do_masking,
+            mask_p_min,
+            mask_p_max,
+            do_intensity_zeroing,
+        )
+
+    def __getitem__(self, idx):
+        '''
+        Returns:
+            sample: Open vocab BEV sample (2, H, W, D) where D is the dimension
+                of language embeddings.
+        '''
+        sample_path = self.sample_paths[idx]
+        sample = self.preproc_sample(sample_path)
+        return sample
+    
+    def read_sample(self, sample_path) -> dict:
+        '''
+        Read sample from disk with resampling on failure.
+        '''
+        while True:
+            try:
+                sample = self.read_compressed_pickle(sample_path)
+                # Check that sample is readable
+                # sample['embmap_present']
+                # sample['embmap_full']
+                return sample
+            except Exception as e:
+                print(f'Error reading sample {sample_path}: {e}')
+                sample_path = random.choice(self.sample_paths)
+                print(f'\tRetrying with {sample_path}')
+    
+    def preproc_sample(self, sample_path:str) -> torch.Tensor:
+        sample = self.read_sample(sample_path)
+
+        # Remove redundant batch dimensions (added later)
+        embmap_present = sample['embmap_present']
+        embmap_present = torch.tensor(embmap_present, dtype=torch.float16)
+        embmap_full = sample['embmap_full']
+        embmap_full = torch.tensor(embmap_full, dtype=torch.float16)
+
+        sample = torch.stack([embmap_present, embmap_full], dim=0)
+        sample = sample.to(torch.float32)
+
+        if self.do_rand_rot:
+            raise NotImplementedError
+            # k = random.randint(0, 3)
+            # sample = torch.rot90(sample, k, [-2, -1])
+
+        return sample
+
 if __name__ == '__main__':
 
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
 
     do_rand_rot = False
-    dataset = BEVDataset(
-        './c_bevs',
+    dataset = OvBevDataset(
+        '/home/r_karlsson/workspace6/pc-accumulation-lib/pwm_carla_town10_test',
         do_rand_rot,
         do_masking=False,
-        do_intensity_zeroing=True,
     )
     print(len(dataset))
 
@@ -300,6 +381,9 @@ if __name__ == '__main__':
     for idx, sample in enumerate(dataloader):
 
         x, x_oracle = sample.chunk(2, dim=1)
+
+        x = sample[:,0]
+        x_oracle = sample[:,1]
 
         x_road, x_int = x.chunk(2, dim=1)
         x_oracle_road, x_oracle_int = x_oracle.chunk(2, dim=1)
